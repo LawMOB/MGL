@@ -1,4 +1,4 @@
-name: Build MGL
+name: Build MGL (iOS)
 
 on:
   push:
@@ -9,48 +9,43 @@ on:
 
 jobs:
   build:
-    name: Build on macOS
-    runs-on: macos-15          # Apple Silicon M1, Xcode 16, macOS 15
+    name: Build for iOS arm64
+    runs-on: macos-15          # Apple Silicon, Xcode 16, has both macOS + iPhoneOS SDKs
 
     steps:
       # ── 1. Checkout ────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. System tools ─────────────────────────────────────────────────────
+      # ── 2. System tools ────────────────────────────────────────────────────
       - name: Install build tools
-        run: |
-          brew install cmake python3
-          # glm header-only lib (referenced by some include paths)
-          brew install glm
+        run: brew install cmake python3
 
-      # ── 3. Clone external dependencies ─────────────────────────────────────
-      # clone_external.sh must be run from inside external/
+      # ── 3. Resolve iOS SDK path ────────────────────────────────────────────
+      - name: Resolve iOS SDK path
+        id: sdk
+        run: |
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          IOS_VER=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "path=$IOS_SDK"   >> "$GITHUB_OUTPUT"
+          echo "version=$IOS_VER" >> "$GITHUB_OUTPUT"
+          echo "iOS SDK: $IOS_SDK (version $IOS_VER)"
+
+      # ── 4. Clone external dependencies ─────────────────────────────────────
       - name: Clone external dependencies
         run: |
           cd external
           bash clone_external.sh
 
-      # ── 4. Copy MGL headers into GLFW source tree ────────────────────────────
-      # build_external.sh does this first, replicate it here so the step is
-      # explicit and can be cached independently.
-      - name: Copy MGL headers into GLFW src
-        run: |
-          cp MGL/include/MGLContext.h  external/glfw/src/
-          cp MGL/include/MGLRenderer.h external/glfw/src/
-
-      # ── 5. Cache compiled external libraries ────────────────────────────────
-      # Key includes the git SHAs of all cloned repos so the cache is
-      # invalidated whenever any upstream dependency is updated.
-      - name: Get external dependency SHAs for cache key
+      # ── 5. Cache external build artifacts ──────────────────────────────────
+      - name: Get external SHAs for cache key
         id: ext_sha
         run: |
-          SPIRV_CROSS_SHA=$(git -C external/SPIRV-Cross  rev-parse HEAD 2>/dev/null || echo none)
-          SPIRV_TOOLS_SHA=$(git -C external/SPIRV-Tools  rev-parse HEAD 2>/dev/null || echo none)
-          SPIRV_HDR_SHA=$(git  -C external/SPIRV-Headers rev-parse HEAD 2>/dev/null || echo none)
-          GLSLANG_SHA=$(git    -C external/glslang       rev-parse HEAD 2>/dev/null || echo none)
-          GLFW_SHA=$(git       -C external/glfw          rev-parse HEAD 2>/dev/null || echo none)
-          echo "key=${SPIRV_CROSS_SHA}-${SPIRV_TOOLS_SHA}-${SPIRV_HDR_SHA}-${GLSLANG_SHA}-${GLFW_SHA}" >> "$GITHUB_OUTPUT"
+          SC=$(git -C external/SPIRV-Cross  rev-parse HEAD 2>/dev/null || echo none)
+          ST=$(git -C external/SPIRV-Tools  rev-parse HEAD 2>/dev/null || echo none)
+          SH=$(git -C external/SPIRV-Headers rev-parse HEAD 2>/dev/null || echo none)
+          GL=$(git -C external/glslang       rev-parse HEAD 2>/dev/null || echo none)
+          echo "key=${SC}-${ST}-${SH}-${GL}-${{ steps.sdk.outputs.version }}" >> "$GITHUB_OUTPUT"
 
       - name: Cache external build artifacts
         id: cache_ext
@@ -61,93 +56,144 @@ jobs:
             external/SPIRV-Tools/build
             external/SPIRV-Headers/build
             external/glslang/build
-            external/glfw/build
-          key: ext-libs-${{ runner.os }}-${{ runner.arch }}-${{ steps.ext_sha.outputs.key }}
+          key: ext-ios-arm64-${{ steps.ext_sha.outputs.key }}
 
-      # ── 6. Build external dependencies (skipped on cache hit) ───────────────
-      - name: Build SPIRV-Tools
+      # ── 6. Build external libs for iOS arm64 (skipped on cache hit) ────────
+      # All external libs are compiled with iOS SDK + arm64 so they can be
+      # linked into the final dylibs that run on iPhone.
+
+      - name: Build SPIRV-Tools (iOS)
         if: steps.cache_ext.outputs.cache-hit != 'true'
         run: |
-          cd external/SPIRV-Tools
-          mkdir -p build && cd build
-          cmake .. \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          cmake -S external/SPIRV-Tools -B external/SPIRV-Tools/build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_SYSROOT="${{ steps.sdk.outputs.path }}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
             -DSPIRV_SKIP_TESTS=ON \
-            -DSPIRV_SKIP_EXECUTABLES=ON
-          make -j$(sysctl -n hw.logicalcpu)
+            -DSPIRV_SKIP_EXECUTABLES=ON \
+            -DSPIRV_WERROR=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build external/SPIRV-Tools/build --parallel $(sysctl -n hw.logicalcpu)
 
-      - name: Build SPIRV-Cross
+      - name: Build SPIRV-Headers (iOS)
         if: steps.cache_ext.outputs.cache-hit != 'true'
         run: |
-          cd external/SPIRV-Cross
-          mkdir -p build && cd build
-          cmake .. \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          cmake -S external/SPIRV-Headers -B external/SPIRV-Headers/build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_SYSROOT="${{ steps.sdk.outputs.path }}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build external/SPIRV-Headers/build --parallel $(sysctl -n hw.logicalcpu)
+
+      - name: Build SPIRV-Cross (iOS)
+        if: steps.cache_ext.outputs.cache-hit != 'true'
+        run: |
+          cmake -S external/SPIRV-Cross -B external/SPIRV-Cross/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_SYSROOT="${{ steps.sdk.outputs.path }}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
             -DSPIRV_CROSS_STATIC=ON \
             -DSPIRV_CROSS_CLI=OFF \
-            -DSPIRV_CROSS_ENABLE_TESTS=OFF
-          make -j$(sysctl -n hw.logicalcpu)
+            -DSPIRV_CROSS_ENABLE_TESTS=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build external/SPIRV-Cross/build --parallel $(sysctl -n hw.logicalcpu)
 
-      - name: Build SPIRV-Headers
-        if: steps.cache_ext.outputs.cache-hit != 'true'
-        run: |
-          cd external/SPIRV-Headers
-          mkdir -p build && cd build
-          cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release
-          make -j$(sysctl -n hw.logicalcpu)
-
-      - name: Build glslang
+      - name: Build glslang (iOS)
         if: steps.cache_ext.outputs.cache-hit != 'true'
         run: |
           cd external/glslang
           python3 update_glslang_sources.py
-          mkdir -p build && cd build
-          cmake .. \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+          cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_SYSROOT="${{ steps.sdk.outputs.path }}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
             -DENABLE_GLSLANG_BINARIES=OFF \
-            -DENABLE_CTEST=OFF
-          make -j$(sysctl -n hw.logicalcpu)
+            -DENABLE_CTEST=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake --build build --parallel $(sysctl -n hw.logicalcpu)
 
-      - name: Build GLFW
-        if: steps.cache_ext.outputs.cache-hit != 'true'
+      # ── 7. Build libmgl.dylib + libmgl_es.dylib for iOS ────────────────────
+      # Override the Makefile's macOS-specific variables:
+      #   SDK_ROOT     -> iPhoneOS SDK  (not macosx)
+      #   APPLE_CLANG  -> same clang, but now targeting iOS
+      #   LIBS         -> drop Cocoa/IOKit (not present on iOS)
+      #   CFLAGS extra -> -target arm64-apple-ios14.0 + min-version flag
+      # We build only the "mgl" and "mgl_es" targets (no libglfw — iOS manages
+      # its own windowing; iOS Launcher does not need GLFW).
+      - name: Build MGL for iOS
         run: |
-          cd external/glfw
-          mkdir -p build && cd build
-          cmake .. \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DGLFW_BUILD_TESTS=OFF \
-            -DGLFW_BUILD_EXAMPLES=OFF \
-            -DGLFW_BUILD_DOCS=OFF
-          make -j$(sysctl -n hw.logicalcpu) glfw
+          IOS_SDK="${{ steps.sdk.outputs.path }}"
+          IOS_TARGET="arm64-apple-ios14.0"
 
-      # ── 7. Build MGL ─────────────────────────────────────────────────────────
-      - name: Build libmgl.dylib, libmgl_es.dylib, libglfw.dylib
+          # Frameworks available on iOS (no Cocoa, no IOKit, no AppKit)
+          IOS_FRAMEWORKS="-framework Metal -framework Foundation -framework CoreGraphics -framework QuartzCore -framework UIKit"
+
+          make -j$(sysctl -n hw.logicalcpu) \
+            SDK_ROOT="$IOS_SDK" \
+            "CFLAGS=-Wall -gfull -O2 -arch arm64 -target $IOS_TARGET -isysroot $IOS_SDK \
+              -IMGL/include -IMGL/include/GL -IMGL/SPIRV/SPIRV-Cross \
+              -DENABLE_OPT=0 -DSPIRV_CROSS_C_API_MSL=1 -DSPIRV_CROSS_C_API_GLSL=1 \
+              -DSPIRV_CROSS_C_API_CPP=1 -DSPIRV_CROSS_C_API_REFLECT=1 \
+              -I./external/SPIRV-Cross \
+              -I./external/SPIRV-Tools/include \
+              -I./external/glslang/glslang/Include" \
+            "LIBS=-arch arm64 -target $IOS_TARGET -isysroot $IOS_SDK \
+              $IOS_FRAMEWORKS \
+              -L./external/SPIRV-Cross/build -lspirv-cross-core -lspirv-cross-c \
+              -lspirv-cross-cpp -lspirv-cross-msl -lspirv-cross-glsl \
+              -lspirv-cross-hlsl -lspirv-cross-reflect \
+              ./external/glslang/build/glslang/libglslang.a \
+              ./external/glslang/build/glslang/libMachineIndependent.a \
+              ./external/glslang/build/glslang/libGenericCodeGen.a \
+              ./external/glslang/build/glslang/OSDependent/Unix/libOSDependent.a \
+              ./external/glslang/build/glslang/libglslang-default-resource-limits.a \
+              ./external/glslang/build/SPIRV/libSPIRV.a \
+              ./external/SPIRV-Tools/build/source/libSPIRV-Tools.a \
+              ./external/SPIRV-Tools/build/source/opt/libSPIRV-Tools-opt.a \
+              ./external/SPIRV-Tools/build/source/link/libSPIRV-Tools-link.a \
+              ./external/SPIRV-Tools/build/source/reduce/libSPIRV-Tools-reduce.a \
+              ./external/SPIRV-Tools/build/source/diff/libSPIRV-Tools-diff.a \
+              ./external/SPIRV-Tools/build/source/lint/libSPIRV-Tools-lint.a \
+              -lc++" \
+            build/libmgl.dylib build/libmgl_es.dylib
+
+      - name: Rename output to libmgl_core.dylib
         run: |
-          make -j$(sysctl -n hw.logicalcpu) lib
+          cp build/libmgl.dylib    build/libmgl_core.dylib
+          cp build/libmgl_es.dylib build/libmgl_es_core.dylib
 
-      # ── 8. Verify outputs ────────────────────────────────────────────────────
+          # Fix install name so dlopen finds the right dylib at runtime
+          install_name_tool -id @rpath/libmgl_core.dylib    build/libmgl_core.dylib
+          install_name_tool -id @rpath/libmgl_es_core.dylib build/libmgl_es_core.dylib
+
+      # ── 9. Verify outputs ──────────────────────────────────────────────────
       - name: Verify build outputs
         run: |
-          echo "=== Build outputs ==="
-          ls -lh build/libmgl.dylib build/libmgl_es.dylib build/libglfw.dylib
-          echo "=== Dynamic library info ==="
-          file build/libmgl.dylib
-          otool -L build/libmgl.dylib | head -20
+          echo "=== Files ==="
+          ls -lh build/libmgl_core.dylib build/libmgl_es_core.dylib
+          echo "=== Architecture (must be arm64) ==="
+          lipo -info build/libmgl_core.dylib
+          echo "=== Platform (must show iphoneos / ios) ==="
+          vtool -show-build build/libmgl_core.dylib
+          echo "=== Linked frameworks ==="
+          otool -L build/libmgl_core.dylib
 
-      # ── 9. Upload artifacts ──────────────────────────────────────────────────
-      - name: Upload MGL libraries
+      # ── 10. Upload artifact ────────────────────────────────────────────────
+      - name: Upload MGL iOS libraries
         uses: actions/upload-artifact@v4
         with:
-          name: mgl-libs-${{ runner.arch }}-${{ github.sha }}
+          name: mgl-ios-arm64-${{ github.sha }}
           path: |
-            build/libmgl.dylib
-            build/libmgl_es.dylib
-            build/libglfw.dylib
+            build/libmgl_core.dylib
+            build/libmgl_es_core.dylib
           retention-days: 30
           if-no-files-found: error
           
