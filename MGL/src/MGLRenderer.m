@@ -2709,7 +2709,14 @@ static void mglApplyMinecraftRenderPipelineStateFallback(GLMContext glctx)
         }
     } else if (depth3DProgram && !lightmapTarget) {
         bool targetCanUseDepth = defaultTarget || targetHasDepthAttachment;
-        if (targetCanUseDepth && !glctx->state.caps.depth_test) {
+        // For non-default FBO targets (e.g. Sodium's offscreen FBO), only force
+        // depth state when the FBO actually has a depth attachment.  Without this
+        // guard, Sodium's per-draw-call depth_test toggles (off for GUI, on for
+        // world) cause this branch to fire hundreds of times per second, producing
+        // a tight override loop that drops FPS to single digits.
+        bool shouldForceDepth = defaultTarget ? targetCanUseDepth
+                                              : targetHasDepthAttachment;
+        if (shouldForceDepth && !glctx->state.caps.depth_test) {
             reason = "depth3d-enable-depth";
             glctx->state.caps.depth_test = GL_TRUE;
             dirty |= DIRTY_RENDER_STATE;
@@ -2717,14 +2724,14 @@ static void mglApplyMinecraftRenderPipelineStateFallback(GLMContext glctx)
                 dirty |= DIRTY_FBO;
             }
         }
-        if (targetCanUseDepth &&
+        if (shouldForceDepth &&
             glctx->state.var.depth_func != GL_LESS &&
             glctx->state.var.depth_func != GL_LEQUAL) {
             reason = reason ? reason : "depth3d-depth-func";
             glctx->state.var.depth_func = GL_LEQUAL;
             dirty |= DIRTY_RENDER_STATE;
         }
-        if (targetCanUseDepth &&
+        if (shouldForceDepth &&
             !glctx->state.caps.blend &&
             !glctx->state.var.depth_writemask) {
             reason = reason ? reason : "depth3d-depth-write";
@@ -10884,14 +10891,20 @@ void logDirtyBits(GLMContext ctx)
     _fallbackLightmapSampledTexture = [_device newTextureWithDescriptor:desc];
     if (_fallbackLightmapSampledTexture) {
         uint32_t pixels[16 * 16];
+        // Use a neutral ~50% brightness value instead of 0xFFFFFFFF (all-white).
+        // All-white causes the world to render at maximum brightness when the real
+        // Minecraft lightmap (Sampler2) fails to bind — the "world brightness problem"
+        // seen in 1.21.10 / 1.21.11.  0xFF808080 = R=128 G=128 B=128 A=255 in
+        // MTLPixelFormatRGBA8Unorm, giving a neutral mid-grey that preserves
+        // relative lighting contrast without blowing out the scene.
         for (NSUInteger i = 0; i < (sizeof(pixels) / sizeof(pixels[0])); i++) {
-            pixels[i] = 0xffffffffu;
+            pixels[i] = 0xFF808080u;
         }
         [_fallbackLightmapSampledTexture replaceRegion:MTLRegionMake2D(0, 0, 16, 16)
                                            mipmapLevel:0
                                              withBytes:pixels
                                            bytesPerRow:(16 * sizeof(uint32_t))];
-        NSLog(@"MGL INFO: Created 16x16 fallback lightmap texture for missing Sampler2 resources");
+        NSLog(@"MGL INFO: Created 16x16 fallback lightmap texture (neutral 50%% grey) for missing Sampler2 resources");
     } else {
         NSLog(@"MGL ERROR: Failed to create fallback lightmap texture");
     }
@@ -29400,4 +29413,3 @@ void* CppCreateMGLRendererAndBindToContext (void *glm_ctx)
 }
 
 @end
-
