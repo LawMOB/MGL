@@ -1,0 +1,153 @@
+name: Build MGL
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on macOS
+    runs-on: macos-15          # Apple Silicon M1, Xcode 16, macOS 15
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. System tools ─────────────────────────────────────────────────────
+      - name: Install build tools
+        run: |
+          brew install cmake python3
+          # glm header-only lib (referenced by some include paths)
+          brew install glm
+
+      # ── 3. Clone external dependencies ─────────────────────────────────────
+      # clone_external.sh must be run from inside external/
+      - name: Clone external dependencies
+        run: |
+          cd external
+          bash clone_external.sh
+
+      # ── 4. Copy MGL headers into GLFW source tree ────────────────────────────
+      # build_external.sh does this first, replicate it here so the step is
+      # explicit and can be cached independently.
+      - name: Copy MGL headers into GLFW src
+        run: |
+          cp MGL/include/MGLContext.h  external/glfw/src/
+          cp MGL/include/MGLRenderer.h external/glfw/src/
+
+      # ── 5. Cache compiled external libraries ────────────────────────────────
+      # Key includes the git SHAs of all cloned repos so the cache is
+      # invalidated whenever any upstream dependency is updated.
+      - name: Get external dependency SHAs for cache key
+        id: ext_sha
+        run: |
+          SPIRV_CROSS_SHA=$(git -C external/SPIRV-Cross  rev-parse HEAD 2>/dev/null || echo none)
+          SPIRV_TOOLS_SHA=$(git -C external/SPIRV-Tools  rev-parse HEAD 2>/dev/null || echo none)
+          SPIRV_HDR_SHA=$(git  -C external/SPIRV-Headers rev-parse HEAD 2>/dev/null || echo none)
+          GLSLANG_SHA=$(git    -C external/glslang       rev-parse HEAD 2>/dev/null || echo none)
+          GLFW_SHA=$(git       -C external/glfw          rev-parse HEAD 2>/dev/null || echo none)
+          echo "key=${SPIRV_CROSS_SHA}-${SPIRV_TOOLS_SHA}-${SPIRV_HDR_SHA}-${GLSLANG_SHA}-${GLFW_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache external build artifacts
+        id: cache_ext
+        uses: actions/cache@v4
+        with:
+          path: |
+            external/SPIRV-Cross/build
+            external/SPIRV-Tools/build
+            external/SPIRV-Headers/build
+            external/glslang/build
+            external/glfw/build
+          key: ext-libs-${{ runner.os }}-${{ runner.arch }}-${{ steps.ext_sha.outputs.key }}
+
+      # ── 6. Build external dependencies (skipped on cache hit) ───────────────
+      - name: Build SPIRV-Tools
+        if: steps.cache_ext.outputs.cache-hit != 'true'
+        run: |
+          cd external/SPIRV-Tools
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPIRV_SKIP_TESTS=ON \
+            -DSPIRV_SKIP_EXECUTABLES=ON
+          make -j$(sysctl -n hw.logicalcpu)
+
+      - name: Build SPIRV-Cross
+        if: steps.cache_ext.outputs.cache-hit != 'true'
+        run: |
+          cd external/SPIRV-Cross
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSPIRV_CROSS_STATIC=ON \
+            -DSPIRV_CROSS_CLI=OFF \
+            -DSPIRV_CROSS_ENABLE_TESTS=OFF
+          make -j$(sysctl -n hw.logicalcpu)
+
+      - name: Build SPIRV-Headers
+        if: steps.cache_ext.outputs.cache-hit != 'true'
+        run: |
+          cd external/SPIRV-Headers
+          mkdir -p build && cd build
+          cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release
+          make -j$(sysctl -n hw.logicalcpu)
+
+      - name: Build glslang
+        if: steps.cache_ext.outputs.cache-hit != 'true'
+        run: |
+          cd external/glslang
+          python3 update_glslang_sources.py
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_GLSLANG_BINARIES=OFF \
+            -DENABLE_CTEST=OFF
+          make -j$(sysctl -n hw.logicalcpu)
+
+      - name: Build GLFW
+        if: steps.cache_ext.outputs.cache-hit != 'true'
+        run: |
+          cd external/glfw
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGLFW_BUILD_TESTS=OFF \
+            -DGLFW_BUILD_EXAMPLES=OFF \
+            -DGLFW_BUILD_DOCS=OFF
+          make -j$(sysctl -n hw.logicalcpu) glfw
+
+      # ── 7. Build MGL ─────────────────────────────────────────────────────────
+      - name: Build libmgl.dylib, libmgl_es.dylib, libglfw.dylib
+        run: |
+          make -j$(sysctl -n hw.logicalcpu) lib
+
+      # ── 8. Verify outputs ────────────────────────────────────────────────────
+      - name: Verify build outputs
+        run: |
+          echo "=== Build outputs ==="
+          ls -lh build/libmgl.dylib build/libmgl_es.dylib build/libglfw.dylib
+          echo "=== Dynamic library info ==="
+          file build/libmgl.dylib
+          otool -L build/libmgl.dylib | head -20
+
+      # ── 9. Upload artifacts ──────────────────────────────────────────────────
+      - name: Upload MGL libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: mgl-libs-${{ runner.arch }}-${{ github.sha }}
+          path: |
+            build/libmgl.dylib
+            build/libmgl_es.dylib
+            build/libglfw.dylib
+          retention-days: 30
+          if-no-files-found: error
+          
