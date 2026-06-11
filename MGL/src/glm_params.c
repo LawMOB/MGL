@@ -26,13 +26,24 @@
 
 #include <unistd.h>
 #include <dlfcn.h>
+#if !TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
 #include <OpenGL/OpenGL.h>
+#endif
 
 typedef struct GLMContextRec_t *GLMContext;
 
 
 void getMacOSDefaults(GLMContext glm_ctx)
 {
+#if TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+    /*
+     * CGL (OpenGL.framework) does not exist on iOS.  This function is a no-op
+     * on iOS; glm_context.c validates every value returned here and substitutes
+     * safe Metal-appropriate defaults for anything that is zero / 0x01010101.
+     */
+    (void)glm_ctx;
+    return;
+#else
     void *OpenGL, *libGL;
     const char *OpenGLPath = "/System/Library/Frameworks/OpenGL.framework/OpenGL";
     const char *libGLPath = "/System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib";
@@ -423,4 +434,5 @@ void getMacOSDefaults(GLMContext glm_ctx)
 
     dlclose(OpenGL);
     dlclose(libGL);
+#endif /* !TARGET_OS_IPHONE */
 }
