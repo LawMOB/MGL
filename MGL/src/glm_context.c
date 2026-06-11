@@ -28,8 +28,7 @@
 
 #include <assert.h>
 #include <CoreFoundation/CoreFoundation.h>
-#include <mach/mach_init.h>
-#include <mach/vm_map.h>
+#include "mgl_mach_compat.h"
 
 #include "glm_context.h"
 #include "vertex_arrays.h"
