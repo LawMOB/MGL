@@ -18,9 +18,7 @@
  *
  */
 
-#include <mach/mach_vm.h>
-#include <mach/mach_init.h>
-#include <mach/vm_map.h>
+#include "mgl_mach_compat.h"
 #include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
